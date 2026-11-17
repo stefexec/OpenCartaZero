@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OpenCartaZero
+Comment=Focus V Carta Sport & Carta 2 BLE Controller
+Exec=/usr/share/APPLaunch/bin/opencartazero
+Icon=share/images/opencartazero.png
+Terminal=false
+Categories=Utility;
+StartupNotify=false

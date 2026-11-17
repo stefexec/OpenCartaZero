@@ -1,0 +1,3 @@
+#!/bin/sh
+cd "${HOME:-/tmp}" 2>/dev/null || cd /tmp
+exec /usr/bin/python3 /usr/share/APPLaunch/apps/opencartazero/opencartazero.py "$@"
