@@ -94,13 +94,29 @@ KEY_DOWN = 108
 KEY_TO_CHAR = {
     KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5",
     KEY_6: "6", KEY_7: "7", KEY_8: "8", KEY_9: "9", KEY_0: "0",
+    KEY_Q: "q", KEY_W: "w", KEY_E: "e", KEY_R: "r", KEY_T: "t",
+    KEY_Y: "y", KEY_U: "u", KEY_I: "i", KEY_O: "o", KEY_P: "p",
+    KEY_A: "a", KEY_S: "s", KEY_D: "d", KEY_F: "f", KEY_G: "g",
+    KEY_H: "h", KEY_J: "j", KEY_K: "k", KEY_L: "l",
+    KEY_Z: "z", KEY_X: "x", KEY_C: "c", KEY_V: "v", KEY_B: "b",
+    KEY_N: "n", KEY_M: "m", KEY_SPACE: " ", KEY_MINUS: "-",
+    KEY_EQUAL: "=", KEY_LEFTBRACE: "[", KEY_RIGHTBRACE: "]",
+    KEY_SEMICOLON: ";", KEY_APOSTROPHE: "'",
+    KEY_DOT: ".", KEY_COMMA: ",", KEY_SLASH: "/",
+}
+
+KEY_TO_CHAR_SHIFT = {
+    KEY_1: "!", KEY_2: "@", KEY_3: "#", KEY_4: "$", KEY_5: "%",
+    KEY_6: "^", KEY_7: "&", KEY_8: "*", KEY_9: "(", KEY_0: ")",
     KEY_Q: "Q", KEY_W: "W", KEY_E: "E", KEY_R: "R", KEY_T: "T",
     KEY_Y: "Y", KEY_U: "U", KEY_I: "I", KEY_O: "O", KEY_P: "P",
     KEY_A: "A", KEY_S: "S", KEY_D: "D", KEY_F: "F", KEY_G: "G",
     KEY_H: "H", KEY_J: "J", KEY_K: "K", KEY_L: "L",
     KEY_Z: "Z", KEY_X: "X", KEY_C: "C", KEY_V: "V", KEY_B: "B",
-    KEY_N: "N", KEY_M: "M", KEY_SPACE: " ", KEY_MINUS: "-",
-    KEY_DOT: ".", KEY_COMMA: ",",
+    KEY_N: "N", KEY_M: "M", KEY_SPACE: " ", KEY_MINUS: "_",
+    KEY_EQUAL: "+", KEY_LEFTBRACE: "{", KEY_RIGHTBRACE: "}",
+    KEY_SEMICOLON: ":", KEY_APOSTROPHE: '"',
+    KEY_DOT: ">", KEY_COMMA: "<", KEY_SLASH: "?",
 }
 
 # ==============================================================================
@@ -210,6 +226,19 @@ def pkt_settings_11(
         0x01 if low_power else 0x00,
         0x11,
     ])
+
+
+def pkt_preset_table_66(presets: dict[int, tuple[int, int]], unit_byte: int) -> bytes:
+    out = bytearray([0x66, 0x13])
+    default_t = 446 if unit_byte == 0x11 else 230
+    for slot in range(1, 6):
+        t, sec = presets.get(slot, (default_t, 55))
+        tc = max(50, min(650, int(t)))
+        sc = max(10, min(240, int(sec)))
+        out.extend([(tc >> 8) & 0xFF, tc & 0xFF, sc & 0xFF])
+    out.append(unit_byte & 0xFF)
+    out.append(0x66)
+    return bytes(out)
 
 
 def pkt_cc_command(
@@ -346,7 +375,7 @@ def eval_curve_temp_c(points_c: list[tuple[int, int]], mode: str, elapsed_sec: f
     for i in range(len(pts) - 1):
         t0, c0 = pts[i]
         t1, c1 = pts[i + 1]
-        if t0 <= elapsed_sec <= t1:
+        if t0 <= elapsed_sec < t1:
             if mode == "step" or t1 == t0:
                 return c0
             frac = (elapsed_sec - t0) / float(t1 - t0)
@@ -377,6 +406,11 @@ class CartaBleManager:
         self.sub_id: int | None = None
         self.user_disconnected = True
         self.last_known_dev: dict | None = self._load_saved_device()
+        self.last_connected_at: float = float(self.last_known_dev.get("last_connected_at", 0.0)) if self.last_known_dev else 0.0
+        self.was_clean_exit: bool = bool(self.last_known_dev.get("clean_exit", True)) if self.last_known_dev else True
+        self.disconnect_at: float = 0.0
+        self.next_reconnect_at: float = 0.0
+        self.reconnect_attempts: int = 0
         self.last_rx_at: float = 0.0
         self.write_queue: collections.deque = collections.deque()
         self.write_event = threading.Event()
@@ -419,6 +453,7 @@ class CartaBleManager:
         self.sleep_timeout_sec = 600
 
         # Stored Preset Tables
+        self.preset_tables_rx: set[int] = set()
         self.presets_c = {
             1: (230, 55),
             2: (257, 55),
@@ -454,6 +489,7 @@ class CartaBleManager:
             4: {"mode": 0x43, "colors": [0x00F028, 0xFF0000, 0x0000FF, 0xFF00AA, 0xAAFF00]},
             5: {"mode": 0x13, "colors": [0x00F028, 0x0000F9, 0x00F413, 0x0800E1, 0x0FE300]},
         }
+        self._restore_saved_presets()
 
         # Logs & Callbacks
         self.logs: collections.deque = collections.deque(maxlen=60)
@@ -481,9 +517,34 @@ class CartaBleManager:
             pass
         return None
 
-    def _save_device(self, dev_info: dict) -> None:
+    def _restore_saved_presets(self) -> None:
+        d = self.last_known_dev
+        if not d:
+            return
+        try:
+            if "presets_c" in d:
+                self.presets_c = {int(k): (int(v[0]), int(v[1])) for k, v in d["presets_c"].items()}
+            if "presets_f" in d:
+                self.presets_f = {int(k): (int(v[0]), int(v[1])) for k, v in d["presets_f"].items()}
+            if "unit_byte" in d and d["unit_byte"] in (0x11, 0x22):
+                self.unit_byte = int(d["unit_byte"])
+            if "active_heat_preset" in d:
+                self.active_heat_preset = max(1, min(5, int(d["active_heat_preset"])))
+            tbl = self.presets_f if self.is_fahrenheit else self.presets_c
+            if self.active_heat_preset in tbl:
+                self.wax_temp, self.wax_timer_sec = tbl[self.active_heat_preset]
+        except Exception:
+            pass
+
+    def _save_device(
+        self,
+        dev_info: dict,
+        last_connected_at: float | None = None,
+        clean_exit: bool = False,
+    ) -> None:
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
+            ts = self.last_connected_at if last_connected_at is None else last_connected_at
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(
                     {
@@ -491,11 +552,22 @@ class CartaBleManager:
                         "address": dev_info["address"],
                         "name": dev_info["name"],
                         "is_carta": True,
+                        "last_connected_at": ts,
+                        "clean_exit": clean_exit,
+                        "unit_byte": self.unit_byte,
+                        "active_heat_preset": self.active_heat_preset,
+                        "presets_c": {str(k): list(v) for k, v in self.presets_c.items()},
+                        "presets_f": {str(k): list(v) for k, v in self.presets_f.items()},
                     },
                     f,
                 )
         except Exception:
             pass
+
+    def mark_clean_exit(self) -> None:
+        self.user_disconnected = True
+        if self.last_known_dev:
+            self._save_device(self.last_known_dev, last_connected_at=self.last_connected_at, clean_exit=True)
 
     def _writer_loop(self) -> None:
         while True:
@@ -567,15 +639,25 @@ class CartaBleManager:
                         except Exception:
                             pass
 
-            # 2) If unexpectedly disconnected (not user-initiated), auto-reconnect in background
+            # 2) If unexpectedly disconnected (not user-initiated), auto-reconnect with backoff & 2m decay
             elif (
                 self.status == "DISCONNECTED"
                 and not self.user_disconnected
                 and self.last_known_dev
                 and not self._connect_lock.locked()
+                and self.disconnect_at > 0
             ):
-                self.add_log("INFO", "Auto-reconnecting to Carta...")
-                self.connect_device(self.last_known_dev, is_auto=True)
+                if (now - self.disconnect_at) > 120.0:
+                    self.user_disconnected = True
+                    self.disconnect_at = 0.0
+                    self.reconnect_attempts = 0
+                    self.add_log("INFO", "Auto-reconnect decayed (2m timeout)")
+                elif now >= self.next_reconnect_at:
+                    delay = min(30.0, 3.0 * (2 ** self.reconnect_attempts))
+                    self.reconnect_attempts += 1
+                    self.next_reconnect_at = now + delay
+                    self.add_log("INFO", f"Auto-reconnecting to Carta (try #{self.reconnect_attempts})...")
+                    self.connect_device(self.last_known_dev, is_auto=True)
 
     @property
     def is_connected(self) -> bool:
@@ -636,8 +718,16 @@ class CartaBleManager:
                     self._handle_notification(bytes(changed_props["Value"]))
             elif path == self.device_path and changed_iface == "org.bluez.Device1":
                 if "Connected" in changed_props and not changed_props["Connected"]:
+                    was_connected = self.status == "CONNECTED"
                     self.status = "DISCONNECTED"
                     self.remaining_sec = 0
+                    if was_connected and not self.user_disconnected:
+                        now = time.time()
+                        self.disconnect_at = now
+                        self.reconnect_attempts = 0
+                        self.next_reconnect_at = now + 3.0
+                        if self.last_known_dev:
+                            self._save_device(self.last_known_dev, last_connected_at=now, clean_exit=False)
                     self.add_log("INFO", "Disconnected from device")
         except Exception:
             pass
@@ -664,6 +754,9 @@ class CartaBleManager:
     def start_scan(self) -> None:
         if not self.bus:
             self.add_log("INFO", "BlueZ D-Bus unavailable")
+            return
+        if self._connect_lock.locked():
+            self.add_log("INFO", "Busy connecting, scan skipped")
             return
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
@@ -767,7 +860,11 @@ class CartaBleManager:
                 continue
             addr = dev.get("Address", "")
             raw_name = (dev.get("Name") or dev.get("Alias") or "").replace("\x00", "").strip()
-            rssi = dev.get("RSSI", -99)
+            rssi = dev.get("RSSI")
+            if rssi is None and not dev.get("Connected", False):
+                continue
+            if rssi is None:
+                rssi = -60
             uuids = [u.lower() for u in dev.get("UUIDs", [])]
             mfg = dev.get("ManufacturerData", {})
             telink_bytes = mfg.get(TELINK_MFG_ID) or mfg.get(str(TELINK_MFG_ID))
@@ -807,7 +904,10 @@ class CartaBleManager:
             return
         self.user_disconnected = False
         self.last_known_dev = dict(dev_info)
-        self._save_device(dev_info)
+        if not is_auto:
+            self.disconnect_at = 0.0
+            self.reconnect_attempts = 0
+            self.next_reconnect_at = 0.0
         self.stop_scan()
         threading.Thread(target=self._connect_worker, args=(dev_info, is_auto), daemon=True).start()
 
@@ -827,14 +927,16 @@ class CartaBleManager:
                 self.battery_percent = dev_info["battery"]
 
             self.status = "CONNECTING"
+            self.preset_tables_rx.clear()
             # Critical: Stop BLE scanning before initiating LE connection so BCM4343A2 radio doesn't drop packets!
             self.stop_scan()
             time.sleep(0.15)
 
-            for attempt in range(1, 4):
+            max_attempts = 1 if is_auto else 3
+            for attempt in range(1, max_attempts + 1):
                 if self.user_disconnected:
                     break
-                self.add_log("INFO", f"Connecting to {self.device_name} (try {attempt}/3)...")
+                self.add_log("INFO", f"Connecting to {self.device_name} (try {attempt}/{max_attempts})...")
                 try:
                     # If not in BlueZ cache yet, run a brief 1.8s LE scan first
                     objs = self._get_managed_objects()
@@ -961,6 +1063,11 @@ class CartaBleManager:
                             pass
 
                     self.last_rx_at = time.time()
+                    self.last_connected_at = self.last_rx_at
+                    self.disconnect_at = 0.0
+                    self.reconnect_attempts = 0
+                    self.next_reconnect_at = 0.0
+                    self._save_device(dev_info, last_connected_at=self.last_connected_at, clean_exit=False)
                     self.status = "CONNECTED"
                     self.add_log("INFO", "Connected! Sending 0xdd UTC sync...")
                     if self.on_connected_cb:
@@ -1075,6 +1182,9 @@ class CartaBleManager:
         tbl = self.presets_f if self.is_fahrenheit else self.presets_c
         if s in tbl:
             self.wax_temp, self.wax_timer_sec = tbl[s]
+        htbl = self.herb_presets_f if self.is_fahrenheit else self.herb_presets_c
+        if s in htbl:
+            self.herb_temp, self.herb_timer_sec = htbl[s]
         self.send_11_settings(heat_preset=s)
 
     def toggle_unit(self) -> None:
@@ -1111,32 +1221,58 @@ class CartaBleManager:
         herb_temp: int | None = None,
         herb_timer: int | None = None,
     ) -> None:
-        if wax_temp is not None:
-            self.wax_temp = wax_temp
-        if wax_timer is not None:
-            self.wax_timer_sec = wax_timer
-        if herb_temp is not None:
-            self.herb_temp = herb_temp
-        if herb_timer is not None:
-            self.herb_timer_sec = herb_timer
+        if action_byte == 0xA5 and self.is_connected and not self.has_atomizer:
+            self.add_log("INFO", "Blocked 0xA5 START SESH: no atomizer")
+            return
 
         slot = self.active_heat_preset if preset_slot is None else preset_slot
-        if slot in (1, 2, 3, 4, 5) and action_byte == 0x00:
+        wt = self.wax_temp if wax_temp is None else wax_temp
+        ws = self.wax_timer_sec if wax_timer is None else wax_timer
+        ht = self.herb_temp if herb_temp is None else herb_temp
+        hs = self.herb_timer_sec if herb_timer is None else herb_timer
+
+        if action_byte == 0x00 and slot in (1, 2, 3, 4, 5):
+            self.preset_tables_rx.update((0x22, 0x33, 0x44, 0x55))
             if self.is_fahrenheit:
-                self.presets_f[slot] = (self.wax_temp, self.wax_timer_sec)
+                self.presets_f[slot] = (wt, ws)
+                self.presets_c[slot] = (f_to_c(wt), ws)
+                self.herb_presets_f[slot] = (ht, hs)
+                self.herb_presets_c[slot] = (f_to_c(ht), hs)
+                tbl_66 = self.presets_f
             else:
-                self.presets_c[slot] = (self.wax_temp, self.wax_timer_sec)
+                self.presets_c[slot] = (wt, ws)
+                self.presets_f[slot] = (c_to_f(wt), ws)
+                self.herb_presets_c[slot] = (ht, hs)
+                self.herb_presets_f[slot] = (c_to_f(ht), hs)
+                tbl_66 = self.presets_c
+            if slot == self.active_heat_preset:
+                self.wax_temp = wt
+                self.wax_timer_sec = ws
+                self.herb_temp = ht
+                self.herb_timer_sec = hs
+                self.is_manual_heat = False
+            pkt66 = pkt_preset_table_66(tbl_66, self.unit_byte)
+            self.write_packet(pkt66, f"SAVE TABLE 0x66 P{slot}={wt}°/{ws}s")
+            if self.last_known_dev:
+                self._save_device(self.last_known_dev, clean_exit=False)
+        else:
+            if action_byte == 0x00 and slot == 0:
+                self.is_manual_heat = True
+            self.wax_temp = wt
+            self.wax_timer_sec = ws
+            self.herb_temp = ht
+            self.herb_timer_sec = hs
 
         pkt = pkt_cc_command(
-            self.herb_temp,
-            self.wax_temp,
+            ht,
+            wt,
             self.unit_byte,
-            self.herb_timer_sec,
-            self.wax_timer_sec,
+            hs,
+            ws,
             slot,
             action_byte,
         )
-        lbl = "START SESH" if action_byte == 0xA5 else ("STOP SESH" if action_byte == 0xAF else f"CC {self.wax_temp}°/{self.wax_timer_sec}s")
+        lbl = "START SESH" if action_byte == 0xA5 else ("STOP SESH" if action_byte == 0xAF else f"CC {wt}°/{ws}s")
         self.write_packet(pkt, lbl)
 
     def send_timeouts(self, led_min: int, sleep_min: int) -> None:
@@ -1193,27 +1329,42 @@ class CartaBleManager:
 
             self.has_atomizer = atomizer
             self.unit_byte = u
-            self.is_manual_heat = raw_preset == 0
+            is_manual = raw_preset == 0
+            self.is_manual_heat = is_manual
             if 1 <= raw_preset <= 5:
                 self.active_heat_preset = raw_preset
             self.remaining_sec = rem_sec
             self.current_temp = cur_temp
-            self.herb_temp = herb_temp
-            self.wax_temp = wax_temp
+
+            if not is_manual and 1 <= raw_preset <= 5:
+                w_op = 0x33 if u == 0x11 else 0x22
+                h_op = 0x55 if u == 0x11 else 0x44
+                wtbl = self.presets_f if u == 0x11 else self.presets_c
+                htbl = self.herb_presets_f if u == 0x11 else self.herb_presets_c
+                ap = wtbl.get(raw_preset) if w_op in self.preset_tables_rx else None
+                hp = htbl.get(raw_preset) if h_op in self.preset_tables_rx else None
+                self.wax_temp = ap[0] if ap else wax_temp
+                self.wax_timer_sec = ap[1] if ap else wax_timer
+                self.herb_temp = hp[0] if hp else herb_temp
+                self.herb_timer_sec = hp[1] if hp else herb_timer
+            else:
+                self.herb_temp = herb_temp
+                self.wax_temp = wax_temp
+                self.herb_timer_sec = herb_timer
+                self.wax_timer_sec = wax_timer
+
             self.battery_percent = bat
             self.is_charging = charging
             self.active_led_preset = led_preset
             if led_bright > 0:
                 self.led_brightness = led_bright
-            self.herb_timer_sec = herb_timer
-            self.wax_timer_sec = wax_timer
             if vibe > 0:
                 self.vibe_level = vibe
             self.low_power_mode = lp
             self.standby_countdown = standby
 
             if self.on_telemetry_cb:
-                self.on_telemetry_cb(cur_temp, wax_temp, rem_sec, u == 0x11)
+                self.on_telemetry_cb(cur_temp, self.wax_temp, rem_sec, u == 0x11)
 
         elif op == 0xAA and len(b) == 19:
             c1, c2, c3, c4 = struct.unpack(">IIII", b[2:18])
@@ -1230,14 +1381,23 @@ class CartaBleManager:
                 t = (b[off] << 8) | b[off + 1]
                 sec = b[off + 2]
                 tbl[i + 1] = (t, sec)
+            self.preset_tables_rx.add(op)
             if op == 0x22:
                 self.presets_c = tbl
+                if not self.is_manual_heat and not self.is_fahrenheit and self.active_heat_preset in tbl:
+                    self.wax_temp, self.wax_timer_sec = tbl[self.active_heat_preset]
             elif op == 0x33:
                 self.presets_f = tbl
+                if not self.is_manual_heat and self.is_fahrenheit and self.active_heat_preset in tbl:
+                    self.wax_temp, self.wax_timer_sec = tbl[self.active_heat_preset]
             elif op == 0x44:
                 self.herb_presets_c = tbl
+                if not self.is_manual_heat and not self.is_fahrenheit and self.active_heat_preset in tbl:
+                    self.herb_temp, self.herb_timer_sec = tbl[self.active_heat_preset]
             elif op == 0x55:
                 self.herb_presets_f = tbl
+                if not self.is_manual_heat and self.is_fahrenheit and self.active_heat_preset in tbl:
+                    self.herb_temp, self.herb_timer_sec = tbl[self.active_heat_preset]
             self.add_log("RX", f"Preset Table 0x{op:02x}")
 
         elif 0xE6 <= op <= 0xEA and len(b) == 20:
@@ -1327,7 +1487,11 @@ class OpenCartaZeroApp:
         # Sesh Preset Editor Modal State
         self.sp_slot = 1
         self.sp_herb = False
-        self.sp_focus = 1  # 0=Slot, 1=Temp, 2=Dur, 3=Mode(Wax/Herb), 4=Save
+        self.sp_focus = 1  # 0=Slot, 1=Temp, 2=Dur, 3=Save
+        self.sp_wax_temp = 230
+        self.sp_wax_timer = 55
+        self.sp_herb_temp = 165
+        self.sp_herb_timer = 120
 
         # LED Editor Modal State
         self.le_slot = 5
@@ -1335,8 +1499,8 @@ class OpenCartaZeroApp:
         self.le_stop_idx = 0
 
         # Curves State
-        self.curves = self._load_curves()
         self.curve_idx = 0
+        self.curves = self._load_curves()
         self.curve_focus = 0  # 0=Preset, 1=Mode(Smooth/Step), 2=EditPts, 3=AutoGen, 4=Run/Stop
         self.ce_pt_idx = 0
         self.ce_field = 0  # 0=Time, 1=Temp
@@ -1357,22 +1521,30 @@ class OpenCartaZeroApp:
         # Device Settings Focus (0=LowPower, 1=Unit, 2=Vibe, 3=SleepMin, 4=LedMin, 5=SyncTime, 6=Rename, 7=BleLog, 8=PowerOff)
         self.dev_focus = 0
         self.rename_buf = ""
+        self.rename_target = "DEVICE"  # "DEVICE" or "CURVE"
         self.log_scroll = 0
 
-        # Toast & ESC Hold
+        # Toast, Shift & ESC Hold
         self.toast_msg = ""
         self.toast_until = 0.0
         self.esc_down_at: float | None = None
+        self.shift_down = False
+        self.shift_latch = False
+        self.shift_used = False
 
         if not self.preview_out:
-            if self.ble.last_known_dev:
+            recent = (time.time() - self.ble.last_connected_at) <= 120.0
+            if self.ble.last_known_dev and not self.ble.was_clean_exit and recent:
                 self.ble.scanned_devices = [self.ble.last_known_dev]
+                self.ble.disconnect_at = time.time()
                 self.ble.connect_device(self.ble.last_known_dev, is_auto=True)
+                self.show_toast("Recovering recent session...")
             else:
+                self.ble.user_disconnected = True
                 self.ble.start_scan()
 
     def _load_curves(self) -> list[dict]:
-        curves = [
+        defaults = [
             {
                 "id": c["id"],
                 "name": c["name"],
@@ -1386,20 +1558,43 @@ class OpenCartaZeroApp:
         try:
             if os.path.exists(CURVES_FILE):
                 with open(CURVES_FILE, "r", encoding="utf-8") as f:
-                    custom = json.load(f)
-                    for c in custom:
+                    data = json.load(f)
+                if isinstance(data, dict) and data.get("curves"):
+                    loaded = []
+                    for c in data["curves"]:
+                        loaded.append(
+                            {
+                                "id": c.get("id", f"custom_{len(loaded)}"),
+                                "name": c.get("name", "Custom"),
+                                "mode": c.get("mode", "smooth"),
+                                "desc": c.get("desc", ""),
+                                "pointsC": [list(p) for p in c.get("pointsC", [[0, 220], [50, 235]])],
+                                "custom": bool(c.get("custom", False)),
+                            }
+                        )
+                    if loaded:
+                        self.curve_idx = max(0, min(len(loaded) - 1, int(data.get("active_idx", 0))))
+                        return loaded
+                elif isinstance(data, list):
+                    for c in data:
                         c["custom"] = True
-                        curves.append(c)
+                        defaults.append(c)
         except Exception:
             pass
-        return curves
+        return defaults
 
     def _save_custom_curves(self) -> None:
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            custom = [c for c in self.curves if c.get("custom")]
             with open(CURVES_FILE, "w", encoding="utf-8") as f:
-                json.dump(custom, f, indent=2)
+                json.dump(
+                    {
+                        "active_idx": self.curve_idx % max(1, len(self.curves)),
+                        "curves": self.curves,
+                    },
+                    f,
+                    indent=2,
+                )
         except Exception:
             pass
 
@@ -1450,6 +1645,9 @@ class OpenCartaZeroApp:
                     self.curve_last_sent = desired_u
 
     def start_curve_session(self) -> None:
+        if self.ble.is_connected and not self.ble.has_atomizer:
+            self.show_toast("No atomizer detected!")
+            return
         c = self.active_curve
         dur = max(10, max(p[0] for p in c["pointsC"]))
         start_c = eval_curve_temp_c(c["pointsC"], c["mode"], 0)
@@ -1630,12 +1828,21 @@ class OpenCartaZeroApp:
 
         # Battery icon
         bx, by = W - 15, 6
-        pygame.draw.rect(s, SUBTEXT, (bx, by, 10, 10), width=1, border_radius=2)
-        pygame.draw.rect(s, SUBTEXT, (bx + 3, by - 2, 4, 2))
+        b_outline = MINT if (self.ble.is_connected and self.ble.is_charging) else SUBTEXT
+        pygame.draw.rect(s, b_outline, (bx, by, 10, 10), width=1, border_radius=2)
+        pygame.draw.rect(s, b_outline, (bx + 3, by - 2, 4, 2))
         if self.ble.is_connected:
             fh = max(1, int(6 * self.ble.battery_percent / 100.0))
             bcol = DANGER if self.ble.battery_percent <= 20 else MINT
             pygame.draw.rect(s, bcol, (bx + 2, by + 8 - fh, 6, fh))
+            if self.ble.is_charging:
+                pygame.draw.lines(
+                    s,
+                    WARN,
+                    False,
+                    [(bx + 6, by + 1), (bx + 3, by + 5), (bx + 6, by + 5), (bx + 4, by + 9)],
+                    1,
+                )
 
     def draw_footer(self, hint: str) -> None:
         s = self.screen
@@ -1643,9 +1850,9 @@ class OpenCartaZeroApp:
         pygame.draw.line(s, BORDER, (0, H - 15), (W, H - 15), 1)
         now = time.time()
         if now < self.toast_until and self.toast_msg:
-            txt = self.f_xs_b.render(self.toast_msg[:54], True, MINT)
+            txt = self.f_xs_b.render(self.toast_msg, True, MINT)
         else:
-            txt = self.f_xs.render(hint[:58], True, SUBTEXT)
+            txt = self.f_xs.render(hint, True, SUBTEXT)
         s.blit(txt, (6, H - 13))
 
         if self.esc_down_at is not None:
@@ -1723,9 +1930,10 @@ class OpenCartaZeroApp:
             self.conn_sel = self.conn_sel % len(devs)
             d = devs[self.conn_sel]
             self.draw_carta_rig(88, 76, scale=0.82)
-            t1 = self.f_md.render(d["name"][:17], True, TEXT)
+            t1 = self.f_md.render(d.get("name", "Carta")[:17], True, TEXT)
             bat_s = f" • {d['battery']}%" if d.get("battery") is not None else ""
-            t2 = self.f_xs.render(f"{d['address']} ({d['rssi']}dBm{bat_s})", True, SUBTEXT)
+            rssi_s = f"{d['rssi']}dBm" if d.get("rssi") is not None else "saved"
+            t2 = self.f_xs.render(f"{d.get('address', '')} ({rssi_s}{bat_s})", True, SUBTEXT)
             t3 = self.f_xs_b.render(f"Device {self.conn_sel + 1}/{len(devs)} ([ / ] cycle)", True, MINT)
             s.blit(t1, (118, 38))
             s.blit(t2, (118, 55))
@@ -1792,8 +2000,10 @@ class OpenCartaZeroApp:
             idle_frac = idle_sec / float(max_sleep)
             bar_col = MINT_DIM
         else:
-            m = max_sleep // 60
-            idle_txt = f"IDLE {m}:00"
+            if max_sleep > 600:
+                idle_txt = "IDLE 10:00+"
+            else:
+                idle_txt = f"IDLE {max_sleep // 60}:{max_sleep % 60:02d}"
             idle_frac = 1.0
             bar_col = MUTED
 
@@ -1894,15 +2104,16 @@ class OpenCartaZeroApp:
 
         # Row 5: Primary CTA Button (TAP TO WARM UP / STOP SESSION) (focus 4)
         cta_rect = (98, 127, 216, 24)
-        cta_bg = DANGER if self.ble.is_session_active else MINT
-        cta_fg = TEXT if self.ble.is_session_active else BG
+        no_atty = self.ble.is_connected and not self.ble.has_atomizer
+        cta_bg = DANGER if self.ble.is_session_active else (ELEVATED if no_atty else MINT)
+        cta_fg = TEXT if self.ble.is_session_active else (MUTED if no_atty else BG)
         pygame.draw.rect(s, cta_bg, cta_rect, border_radius=7)
         if self.home_focus == 4:
             pygame.draw.rect(s, TEXT, cta_rect, width=2, border_radius=7)
         cta_txt = (
             f"■ STOP SESSION ({self.ble.remaining_sec}s)"
             if self.ble.is_session_active
-            else "▶ TAP TO WARM UP [Space]"
+            else ("NO ATOMIZER" if no_atty else "▶ TAP TO WARM UP [Space]")
         )
         cs = self.f_sm_b.render(cta_txt, True, cta_fg)
         s.blit(cs, (206 - cs.get_width() // 2, 132))
@@ -1985,8 +2196,11 @@ class OpenCartaZeroApp:
         pw = gw - pad_l - pad_r
         ph = gh - pad_t - pad_b
         dur = float(max(10, max(p[0] for p in c["pointsC"])))
-        min_t = 390.0 if is_f else 200.0
-        max_t = 500.0 if is_f else 260.0
+        pts_u = [c_to_f(p[1]) if is_f else p[1] for p in c["pointsC"]]
+        base_min = 390.0 if is_f else 200.0
+        base_max = 500.0 if is_f else 260.0
+        min_t = float(min(base_min, min(pts_u) - 10))
+        max_t = float(max(base_max, max(pts_u) + 10))
 
         def x_of(t_sec: float) -> int:
             return int(gx + pad_l + (max(0.0, min(dur, t_sec)) / dur) * pw)
@@ -2009,12 +2223,24 @@ class OpenCartaZeroApp:
             xl = self.f_xs.render(f"{t_tick}s", True, MUTED)
             s.blit(xl, (xx - xl.get_width() // 2, gy + gh - 11))
 
-        # Target curve polyline
+        # Target curve polyline (exact vertex & step-corner geometry so dots sit directly on corners)
+        s_pts = sorted(c["pointsC"], key=lambda x: x[0])
         curve_pts = []
-        for t_s in range(0, int(dur) + 1, 2):
-            tc = eval_curve_temp_c(c["pointsC"], c["mode"], t_s)
-            tu = c_to_f(tc) if is_f else tc
-            curve_pts.append((x_of(t_s), y_of(tu)))
+        if c["mode"] == "step":
+            for i, (pt_t, pt_c) in enumerate(s_pts):
+                tu = c_to_f(pt_c) if is_f else pt_c
+                px, py = x_of(pt_t), y_of(tu)
+                curve_pts.append((px, py))
+                if i + 1 < len(s_pts):
+                    next_t = s_pts[i + 1][0]
+                    curve_pts.append((x_of(next_t), py))
+            if s_pts and s_pts[-1][0] < dur:
+                last_u = c_to_f(s_pts[-1][1]) if is_f else s_pts[-1][1]
+                curve_pts.append((x_of(dur), y_of(last_u)))
+        else:
+            for pt_t, pt_c in s_pts:
+                tu = c_to_f(pt_c) if is_f else pt_c
+                curve_pts.append((x_of(pt_t), y_of(tu)))
         if len(curve_pts) >= 2:
             pygame.draw.lines(s, BLUE, False, curve_pts, 2)
 
@@ -2052,9 +2278,14 @@ class OpenCartaZeroApp:
                 True,
             ),
         ]
+        no_atty = self.ble.is_connected and not self.ble.has_atomizer
         for bx, by, bw, bh, btxt, foc, is_cta in btns:
-            bg = (DANGER if self.curve_running else MINT) if is_cta else SURFACE
-            fg = (TEXT if self.curve_running else BG) if is_cta else TEXT
+            if is_cta:
+                bg = DANGER if self.curve_running else (ELEVATED if no_atty else MINT)
+                fg = TEXT if self.curve_running else (MUTED if no_atty else BG)
+            else:
+                bg = SURFACE
+                fg = TEXT
             pygame.draw.rect(s, bg, (bx, by, bw, bh), border_radius=5)
             if not is_cta:
                 pygame.draw.rect(s, MINT if foc else BORDER, (bx, by, bw, bh), width=1, border_radius=5)
@@ -2063,7 +2294,7 @@ class OpenCartaZeroApp:
             ts = self.f_xs_b.render(btxt, True, fg)
             s.blit(ts, (bx + bw // 2 - ts.get_width() // 2, by + 6))
 
-        self.draw_footer("F/X:Focus  [,]:Preset  M:Mode  E:Points  G:Gen  Space:Run")
+        self.draw_footer("[,]:Curve M:Mode E:Pts G:Gen N:New R:Name D:Del Space:Run")
 
     # ==========================================================================
     # TAB 3: DEVICE SETTINGS (3x3 Grid for 320x170)
@@ -2172,8 +2403,8 @@ class OpenCartaZeroApp:
             s.blit(self.f_xs_b.render(f"P{slot}: {pt}°", True, MINT if sel else TEXT), (px + 5, py + 3))
             s.blit(self.f_xs.render(f"{psec}s", True, SUBTEXT), (px + 18, py + 14))
 
-        cur_t = self.ble.herb_temp if self.sp_herb else self.ble.wax_temp
-        cur_s = self.ble.herb_timer_sec if self.sp_herb else self.ble.wax_timer_sec
+        cur_t = self.sp_herb_temp if self.sp_herb else self.sp_wax_temp
+        cur_s = self.sp_herb_timer if self.sp_herb else self.sp_wax_timer
 
         # Temp adjuster
         r1 = (14, 82, 142, 34)
@@ -2258,7 +2489,7 @@ class OpenCartaZeroApp:
         c = self.active_curve
         u = self.ble.unit_str
         is_f = self.ble.is_fahrenheit
-        self._draw_modal_box(f"EDIT POINTS: {c['name'][:22]}", "+:Add  -:Del  S:Save Custom")
+        self._draw_modal_box(f"EDIT POINTS: {c['name'][:20]}", "Enter/S:Save  N:Save New")
 
         pts = c["pointsC"]
         self.ce_pt_idx = self.ce_pt_idx % len(pts)
@@ -2282,7 +2513,7 @@ class OpenCartaZeroApp:
 
         info = f"Point #{self.ce_pt_idx + 1}: Editing {'TIME (sec)' if self.ce_field == 0 else 'TEMP'}  •  Tab:Switch Time/Temp"
         s.blit(self.f_xs.render(info, True, MINT), (16, 126))
-        self.draw_footer("Z/C:Point  Tab:Time/Temp  [,]:Adjust  A:Add Pt  D:Del Pt  S:Save")
+        self.draw_footer("Z/C:Pt  Tab:Time/Temp  [,]:Adj  A:Add  D:Del  Enter/S:Save  N:New")
 
     def _draw_modal_curve_gen(self) -> None:
         s = self.screen
@@ -2342,8 +2573,12 @@ class OpenCartaZeroApp:
 
     def _draw_modal_rename(self) -> None:
         s = self.screen
-        self._draw_modal_box("RENAME CARTA DEVICE (0xac + 0xaf)", "Max 29 chars")
-        s.blit(self.f_xs.render("Type new name using keyboard, Backspace to delete, Enter to save:", True, SUBTEXT), (16, 56))
+        is_curve = self.rename_target == "CURVE"
+        title = "RENAME TEMPERATURE CURVE" if is_curve else "RENAME CARTA DEVICE (0xac + 0xaf)"
+        sh_active = self.shift_down or self.shift_latch
+        right_lbl = "[SHIFT ON]" if sh_active else ("Max 24 chars" if is_curve else "Max 29 chars")
+        self._draw_modal_box(title, right_lbl)
+        s.blit(self.f_xs.render("Shift: A-Z / Symbols  •  Backspace: Del  •  Enter: Save", True, SUBTEXT), (16, 56))
         box = (16, 76, 288, 30)
         pygame.draw.rect(s, BG, box, border_radius=6)
         pygame.draw.rect(s, MINT, box, width=2, border_radius=6)
@@ -2351,9 +2586,10 @@ class OpenCartaZeroApp:
 
         btn = (16, 116, 288, 24)
         pygame.draw.rect(s, MINT, btn, border_radius=6)
-        bt = self.f_sm_b.render("SAVE DEVICE NAME [Enter]", True, BG)
+        btn_lbl = "SAVE CURVE NAME [Enter]" if is_curve else "SAVE DEVICE NAME [Enter]"
+        bt = self.f_sm_b.render(btn_lbl, True, BG)
         s.blit(bt, (160 - bt.get_width() // 2, 122))
-        self.draw_footer("Type Name  Backspace:Del  Enter:Send Rename  ESC:Cancel")
+        self.draw_footer("Type Name  Backspace:Del  Enter:Save Name  ESC:Cancel")
 
     def _draw_modal_power_off(self) -> None:
         s = self.screen
@@ -2382,7 +2618,15 @@ class OpenCartaZeroApp:
                             break
                         _, _, ev_type, code, value = struct.unpack("llHHi", data)
                         if ev_type == 1:
-                            if code == KEY_ESC:
+                            if code in (KEY_LEFTSHIFT, KEY_RIGHTSHIFT):
+                                if value == 1:
+                                    self.shift_down = True
+                                    self.shift_used = False
+                                elif value == 0:
+                                    self.shift_down = False
+                                    if not self.shift_used:
+                                        self.shift_latch = not self.shift_latch
+                            elif code == KEY_ESC:
                                 if value == 1:
                                     self.esc_down_at = now
                                 elif value == 0:
@@ -2469,11 +2713,13 @@ class OpenCartaZeroApp:
         elif code in (KEY_RIGHTBRACE, KEY_SLASH, KEY_C, KEY_RIGHT):
             self.conn_sel += 1
         elif code == KEY_R:
+            self.ble.user_disconnected = True
             self.ble.start_scan()
         elif code == KEY_A:
             self.ble.show_all_ble = not self.ble.show_all_ble
             self.ble.refresh_scanned_devices()
         elif code == KEY_O:
+            self.ble.user_disconnected = True
             self.tab_idx = 1
             self.show_toast("Offline / Demo Mode")
         elif code in (KEY_ENTER, KEY_SPACE):
@@ -2481,6 +2727,7 @@ class OpenCartaZeroApp:
                 self.ble.show_all_ble = not self.ble.show_all_ble
                 self.ble.refresh_scanned_devices()
             elif self.conn_focus == 2:
+                self.ble.user_disconnected = True
                 self.tab_idx = 1
             else:
                 if self.ble.is_connected:
@@ -2502,7 +2749,7 @@ class OpenCartaZeroApp:
         elif code in (KEY_X, KEY_DOWN, KEY_DOT):
             self.home_focus = (self.home_focus + 1) % 5
         elif code == KEY_P:
-            self.sp_slot = self.ble.active_heat_preset
+            self._load_sp_draft(self.ble.active_heat_preset)
             self.modal = "SESH_PRESET"
         elif code == KEY_L:
             self.le_slot = max(1, self.ble.active_led_preset)
@@ -2535,7 +2782,7 @@ class OpenCartaZeroApp:
                 self.ble.send_cc(0x00, preset_slot=0, wax_timer=ns)
         elif code == KEY_ENTER:
             if self.home_focus == 0:
-                self.sp_slot = self.ble.active_heat_preset
+                self._load_sp_draft(self.ble.active_heat_preset)
                 self.modal = "SESH_PRESET"
             elif self.home_focus == 1:
                 self.le_slot = max(1, self.ble.active_led_preset)
@@ -2550,6 +2797,9 @@ class OpenCartaZeroApp:
                 self.ble.remaining_sec = 0
             self.show_toast("Session Stopped (0xaf)")
         else:
+            if self.ble.is_connected and not self.ble.has_atomizer:
+                self.show_toast("No atomizer detected!")
+                return
             self.ble.send_cc(0xA5)
             if not self.ble.is_connected:
                 self.ble.remaining_sec = self.ble.wax_timer_sec
@@ -2563,10 +2813,39 @@ class OpenCartaZeroApp:
         elif code == KEY_M:
             c = self.active_curve
             c["mode"] = "step" if c["mode"] == "smooth" else "smooth"
+            self._save_custom_curves()
         elif code == KEY_E:
             self.modal = "CURVE_EDIT"
         elif code == KEY_G:
             self.modal = "CURVE_GEN"
+        elif code == KEY_R:
+            self.rename_target = "CURVE"
+            self.rename_buf = self.active_curve["name"][:24]
+            self.modal = "RENAME"
+        elif code == KEY_N:
+            new_c = {
+                "id": f"custom_{int(time.time())}",
+                "name": f"Custom {len([x for x in self.curves if x.get('custom')]) + 1}",
+                "mode": self.active_curve["mode"],
+                "desc": "Custom saved curve.",
+                "pointsC": [[p[0], p[1]] for p in self.active_curve["pointsC"]],
+                "custom": True,
+            }
+            self.curves.append(new_c)
+            self.curve_idx = len(self.curves) - 1
+            self._save_custom_curves()
+            self.rename_target = "CURVE"
+            self.rename_buf = new_c["name"]
+            self.modal = "RENAME"
+        elif code in (KEY_D, KEY_BACKSPACE):
+            if len(self.curves) > 1:
+                removed = self.active_curve["name"]
+                self.curves.pop(self.curve_idx % len(self.curves))
+                self.curve_idx = self.curve_idx % len(self.curves)
+                self._save_custom_curves()
+                self.show_toast(f"Deleted {removed}")
+            else:
+                self.show_toast("Cannot delete last curve!")
         elif code == KEY_SPACE:
             if self.curve_running:
                 self.stop_curve_session()
@@ -2575,21 +2854,27 @@ class OpenCartaZeroApp:
         elif code in (KEY_LEFTBRACE, KEY_COMMA, KEY_Z, KEY_LEFT):
             if self.curve_focus == 0:
                 self.curve_idx = (self.curve_idx - 1) % len(self.curves)
+                self._save_custom_curves()
             elif self.curve_focus == 1:
                 c = self.active_curve
                 c["mode"] = "step" if c["mode"] == "smooth" else "smooth"
+                self._save_custom_curves()
         elif code in (KEY_RIGHTBRACE, KEY_SLASH, KEY_C, KEY_RIGHT):
             if self.curve_focus == 0:
                 self.curve_idx = (self.curve_idx + 1) % len(self.curves)
+                self._save_custom_curves()
             elif self.curve_focus == 1:
                 c = self.active_curve
                 c["mode"] = "step" if c["mode"] == "smooth" else "smooth"
+                self._save_custom_curves()
         elif code == KEY_ENTER:
             if self.curve_focus == 0:
                 self.curve_idx = (self.curve_idx + 1) % len(self.curves)
+                self._save_custom_curves()
             elif self.curve_focus == 1:
                 c = self.active_curve
                 c["mode"] = "step" if c["mode"] == "smooth" else "smooth"
+                self._save_custom_curves()
             elif self.curve_focus == 2:
                 self.modal = "CURVE_EDIT"
             elif self.curve_focus == 3:
@@ -2646,6 +2931,7 @@ class OpenCartaZeroApp:
             self.ble.send_time_sync()
             self.show_toast("Sent 0xdd Time Sync!")
         elif self.dev_focus == 6:
+            self.rename_target = "DEVICE"
             self.rename_buf = self.ble.device_name[:29]
             self.modal = "RENAME"
         elif self.dev_focus == 7:
@@ -2654,10 +2940,16 @@ class OpenCartaZeroApp:
             self.modal = "POWER_OFF"
 
     # Modal Key Handlers
+    def _load_sp_draft(self, slot: int) -> None:
+        self.sp_slot = max(1, min(5, slot))
+        wtbl = self.ble.presets_f if self.ble.is_fahrenheit else self.ble.presets_c
+        htbl = self.ble.herb_presets_f if self.ble.is_fahrenheit else self.ble.herb_presets_c
+        self.sp_wax_temp, self.sp_wax_timer = wtbl.get(self.sp_slot, (self.ble.wax_temp, self.ble.wax_timer_sec))
+        self.sp_herb_temp, self.sp_herb_timer = htbl.get(self.sp_slot, (self.ble.herb_temp, self.ble.herb_timer_sec))
+
     def _key_modal_sesh_preset(self, code: int) -> None:
         if code in (KEY_1, KEY_2, KEY_3, KEY_4, KEY_5):
-            self.sp_slot = code - KEY_1 + 1
-            self.ble.select_heat_preset(self.sp_slot)
+            self._load_sp_draft(code - KEY_1 + 1)
         elif code == KEY_M:
             self.sp_herb = not self.sp_herb
         elif code in (KEY_F, KEY_UP, KEY_SEMICOLON):
@@ -2665,35 +2957,44 @@ class OpenCartaZeroApp:
         elif code in (KEY_X, KEY_DOWN, KEY_DOT):
             self.sp_focus = (self.sp_focus + 1) % 4
         elif code in (KEY_LEFTBRACE, KEY_COMMA, KEY_MINUS, KEY_Z, KEY_LEFT):
+            min_w = 300 if self.ble.is_fahrenheit else 150
+            min_h = 200 if self.ble.is_fahrenheit else 100
             if self.sp_focus == 0:
-                self.sp_slot = max(1, self.sp_slot - 1)
-                self.ble.select_heat_preset(self.sp_slot)
+                self._load_sp_draft(max(1, self.sp_slot - 1))
             elif self.sp_focus == 1:
                 if self.sp_herb:
-                    self.ble.herb_temp = max(100, self.ble.herb_temp - 5)
+                    self.sp_herb_temp = max(min_h, self.sp_herb_temp - 5)
                 else:
-                    self.ble.wax_temp = max(150, self.ble.wax_temp - 5)
+                    self.sp_wax_temp = max(min_w, self.sp_wax_temp - 5)
             elif self.sp_focus == 2:
                 if self.sp_herb:
-                    self.ble.herb_timer_sec = max(30, self.ble.herb_timer_sec - 5)
+                    self.sp_herb_timer = max(30, self.sp_herb_timer - 5)
                 else:
-                    self.ble.wax_timer_sec = max(10, self.ble.wax_timer_sec - 5)
+                    self.sp_wax_timer = max(10, self.sp_wax_timer - 5)
         elif code in (KEY_RIGHTBRACE, KEY_SLASH, KEY_EQUAL, KEY_C, KEY_RIGHT):
+            max_w = 650 if self.ble.is_fahrenheit else 340
+            max_h = 450 if self.ble.is_fahrenheit else 232
             if self.sp_focus == 0:
-                self.sp_slot = min(5, self.sp_slot + 1)
-                self.ble.select_heat_preset(self.sp_slot)
+                self._load_sp_draft(min(5, self.sp_slot + 1))
             elif self.sp_focus == 1:
                 if self.sp_herb:
-                    self.ble.herb_temp = min(450, self.ble.herb_temp + 5)
+                    self.sp_herb_temp = min(max_h, self.sp_herb_temp + 5)
                 else:
-                    self.ble.wax_temp = min(650, self.ble.wax_temp + 5)
+                    self.sp_wax_temp = min(max_w, self.sp_wax_temp + 5)
             elif self.sp_focus == 2:
                 if self.sp_herb:
-                    self.ble.herb_timer_sec = min(240, self.ble.herb_timer_sec + 5)
+                    self.sp_herb_timer = min(240, self.sp_herb_timer + 5)
                 else:
-                    self.ble.wax_timer_sec = min(120, self.ble.wax_timer_sec + 5)
+                    self.sp_wax_timer = min(120, self.sp_wax_timer + 5)
         elif code == KEY_ENTER:
-            self.ble.send_cc(0x00, preset_slot=self.sp_slot)
+            self.ble.send_cc(
+                0x00,
+                preset_slot=self.sp_slot,
+                wax_temp=self.sp_wax_temp,
+                wax_timer=self.sp_wax_timer,
+                herb_temp=self.sp_herb_temp,
+                herb_timer=self.sp_herb_timer,
+            )
             self.modal = None
             self.show_toast(f"Saved Preset #{self.sp_slot}")
 
@@ -2757,33 +3058,45 @@ class OpenCartaZeroApp:
                 pts.sort(key=lambda x: x[0])
             else:
                 pts[self.ce_pt_idx][1] = max(150, pts[self.ce_pt_idx][1] - 2)
+            self._save_custom_curves()
         elif code in (KEY_RIGHTBRACE, KEY_SLASH, KEY_EQUAL, KEY_F, KEY_UP):
             if self.ce_field == 0:
                 pts[self.ce_pt_idx][0] = min(120, pts[self.ce_pt_idx][0] + 2)
                 pts.sort(key=lambda x: x[0])
             else:
                 pts[self.ce_pt_idx][1] = min(340, pts[self.ce_pt_idx][1] + 2)
+            self._save_custom_curves()
         elif code == KEY_A and len(pts) < 6:
             last_t, last_c = pts[-1]
             pts.append([min(120, last_t + 10), last_c])
+            self._save_custom_curves()
         elif code == KEY_D and len(pts) > 2:
             pts.pop(self.ce_pt_idx)
             self.ce_pt_idx = min(self.ce_pt_idx, len(pts) - 1)
+            self._save_custom_curves()
+        elif code == KEY_R:
+            self.rename_target = "CURVE"
+            self.rename_buf = self.active_curve["name"][:24]
+            self.modal = "RENAME"
+        elif code == KEY_N:
+            new_c = {
+                "id": f"custom_{int(time.time())}",
+                "name": f"Custom {len([x for x in self.curves if x.get('custom')]) + 1}",
+                "mode": self.active_curve["mode"],
+                "desc": "Custom saved curve.",
+                "pointsC": [[p[0], p[1]] for p in pts],
+                "custom": True,
+            }
+            self.curves.append(new_c)
+            self.curve_idx = len(self.curves) - 1
+            self._save_custom_curves()
+            self.rename_target = "CURVE"
+            self.rename_buf = new_c["name"]
+            self.modal = "RENAME"
         elif code in (KEY_S, KEY_ENTER):
-            if not self.active_curve.get("custom"):
-                new_c = {
-                    "id": f"custom_{int(time.time())}",
-                    "name": f"Custom {len([x for x in self.curves if x.get('custom')]) + 1}",
-                    "mode": self.active_curve["mode"],
-                    "desc": "Custom saved curve.",
-                    "pointsC": [[p[0], p[1]] for p in pts],
-                    "custom": True,
-                }
-                self.curves.append(new_c)
-                self.curve_idx = len(self.curves) - 1
             self._save_custom_curves()
             self.modal = None
-            self.show_toast("Saved Custom Curve!")
+            self.show_toast(f"Saved {self.active_curve['name']}!")
 
     def _key_modal_curve_gen(self, code: int) -> None:
         if code in (KEY_F, KEY_UP, KEY_SEMICOLON):
@@ -2832,8 +3145,9 @@ class OpenCartaZeroApp:
                     pts.append([int(round(u * dur)), int(round(s_c + (e_c - s_c) * (u * u)))])
             self.active_curve["pointsC"] = pts
             self.active_curve["mode"] = mode
+            self._save_custom_curves()
             self.modal = None
-            self.show_toast("Generated Curve!")
+            self.show_toast("Generated & Saved Curve!")
 
     def _key_modal_ble_log(self, code: int) -> None:
         if code in (KEY_F, KEY_UP):
@@ -2848,14 +3162,28 @@ class OpenCartaZeroApp:
             self.ble.send_time_sync()
 
     def _key_modal_rename(self, code: int) -> None:
+        max_len = 24 if self.rename_target == "CURVE" else 29
         if code == KEY_BACKSPACE:
             self.rename_buf = self.rename_buf[:-1]
         elif code == KEY_ENTER:
-            self.ble.send_rename(self.rename_buf)
-            self.modal = None
-            self.show_toast(f"Renamed to {self.ble.device_name}")
-        elif code in KEY_TO_CHAR and len(self.rename_buf) < 29:
-            self.rename_buf += KEY_TO_CHAR[code]
+            clean = self.rename_buf.strip()[:max_len]
+            if self.rename_target == "CURVE":
+                if clean:
+                    self.active_curve["name"] = clean
+                    self._save_custom_curves()
+                self.modal = None
+                self.show_toast(f"Curve: {self.active_curve['name']}")
+            else:
+                self.ble.send_rename(self.rename_buf)
+                self.modal = None
+                self.show_toast(f"Renamed to {self.ble.device_name}")
+        elif code in KEY_TO_CHAR and len(self.rename_buf) < max_len:
+            if self.shift_down or self.shift_latch:
+                self.rename_buf += KEY_TO_CHAR_SHIFT.get(code, KEY_TO_CHAR[code].upper())
+                self.shift_used = True
+                self.shift_latch = False
+            else:
+                self.rename_buf += KEY_TO_CHAR[code]
 
     # ==========================================================================
     # MAIN LOOP & PREVIEW RENDERER
@@ -2927,6 +3255,7 @@ class OpenCartaZeroApp:
                 if dt < 0.04:
                     time.sleep(0.04 - dt)
         finally:
+            self.ble.mark_clean_exit()
             for fd in self.kbd_fds:
                 try:
                     os.close(fd)

@@ -42,7 +42,7 @@ All standard command and notification packets (except the `dd 01 ...` high-rate 
 +---------+---------+------------------------+---------+
 ```
 
-- **Byte 0 (`Opcode`):** Packet type identifier (`0x11`, `0x22`, `0x33`, `0x44`, `0x55`, `0x82`, `0x99`, `0xaa`, `0xac`, `0xaf`, `0xcc`, `0xce`, `0xd1`, `0xd2`, `0xdd`, `0xe0`–`0xea`, `0xfa`, `0xfc`, `0xfd`).
+- **Byte 0 (`Opcode`):** Packet type identifier (`0x11`, `0x22`, `0x33`, `0x44`, `0x55`, `0x66`, `0x82`, `0x99`, `0xaa`, `0xac`, `0xaf`, `0xcc`, `0xce`, `0xd1`, `0xd2`, `0xdd`, `0xe0`–`0xea`, `0xfa`, `0xfc`, `0xfd`).
 - **Byte 1 (`Length`):** Total packet length in bytes, **including** `Byte 0` and the trailing byte.
 - **Last Byte (`Byte[Length - 1]`):** Repeats `Byte 0` as an end-of-frame marker.
 - **Endianness:** Multi-byte numeric fields (temperatures, timers, counters, year) are **big-endian** (`uint16` or `uint32`).
@@ -144,7 +144,30 @@ Configures one of the 5 LED preset slots (`0xe0` = Slot 1 .. `0xe4` = Slot 5), i
 
 ---
 
-### 3.4 Set Temperature / Save Preset / Start & Stop Session (`0xcc`, 16 bytes)
+### 3.4a Write / Save Preset Table to Flash (`0x66`, 19 bytes)
+
+Persists all 5 heating preset slots (`Slot 1`..`Slot 5`) to the Carta's non-volatile flash (updating the `0x22` and `0x33` tables returned on subsequent `0xdd` syncs). Note that `0xcc` only updates the live heating registers and does **not** persist preset tables to flash across reconnections.
+
+**Captured Packets (`btsnoop_hci_261118_234246.log`):**
+- Frame 1346: `66 13 00 e3 2f 01 01 37 01 0c 32 01 17 2d 01 28 28 22 66` (`P1=227°C/47s`, `P2=257°C/55s`, `P3=268°C/50s`, `P4=279°C/45s`, `P5=296°C/40s`)
+- Frame 1471: `66 13 00 e3 2f 01 03 39 01 0c 32 01 17 2d 01 28 28 22 66` (`P2=259°C/57s`)
+- Frame 1720: `66 13 00 e1 2d 01 01 37 01 0c 32 01 17 2d 01 28 28 22 66` (`P1=225°C/45s`)
+
+| Byte(s) | Example | Meaning |
+| :--- | :--- | :--- |
+| `0` | `0x66` | Opcode (`0x66`) |
+| `1` | `0x13` | Total length (`19` bytes) |
+| `2..4` | `0x00e1`, `0x2d` | **Preset 1:** Target Temp (`uint16` BE, `225`°C) + Duration (`uint8`, `45`s) |
+| `5..7` | `0x0101`, `0x37` | **Preset 2:** Target Temp (`uint16` BE, `257`°C) + Duration (`uint8`, `55`s) |
+| `8..10` | `0x010c`, `0x32` | **Preset 3:** Target Temp (`uint16` BE, `268`°C) + Duration (`uint8`, `50`s) |
+| `11..13` | `0x0117`, `0x2d` | **Preset 4:** Target Temp (`uint16` BE, `279`°C) + Duration (`uint8`, `45`s) |
+| `14..16` | `0x0128`, `0x28` | **Preset 5:** Target Temp (`uint16` BE, `296`°C) + Duration (`uint8`, `40`s) |
+| `17` | `0x22`, `0x11` | **Temperature Unit:** `0x22` = °C, `0x11` = °F (device auto-converts the opposite table) |
+| `18` | `0x66` | Trailer (`0x66`) |
+
+---
+
+### 3.4b Set Live Temperature / Start & Stop Session (`0xcc`, 16 bytes)
 
 Used to adjust target temperatures/timers, save them to a preset slot, start a heating session (`Byte 13 = 0xa5`), and stop/cancel an active session (`Byte 13 = 0xaf`).
 

@@ -69,7 +69,7 @@ All screenshots below are captured directly from OpenCartaZero's native `320×17
 - **Automatic Carta Detection:** Filters BLE advertisements for the Carta GATT service (`1011123e-8535-b5a0-7140-a304d2495cb7`), Telink Semiconductor manufacturer data (`0x0211`), or Carta device names (`Pfeifi*`, `CARTA*`, `Focus*`).
 - **Pre-Connect Telemetry:** Displays live battery percentage, RSSI signal strength, and device name right inside the stadium card before even opening a GATT connection.
 - **Show All BLE (`A`):** Toggle to inspect every nearby BLE peripheral if your device advertises under a custom name.
-- **Auto-Reconnect & Offline Mode (`O`):** Remembers your last connected Carta in `~/.config/opencartazero/state.json` and reconnects automatically on startup, or lets you explore/test curves offline.
+- **Auto-Reconnect (2m Decay) & Offline Mode (`O`):** Remembers your last connected Carta in `~/.config/opencartazero/state.json` and recovers unexpected disconnects with exponential backoff (decaying after 2 minutes), while starting a fresh live BLE scan on normal launches.
 
 ### 2. Main Dashboard (`HOME` Tab — Key `2`)
 - **Live Carta Rig Graphic:** Animated hourglass rig with glowing glass collar & base LED ring matching your active LED preset (or pulsing red during active heating), plus an **IDLE / SESH** countdown progress bar.
@@ -78,7 +78,7 @@ All screenshots below are captured directly from OpenCartaZero's native `320×17
   - Total session counter (`DABS: N` from `0xaa`).
   - Header battery badge with charging status.
 - **Direct Sliders:** Adjust target **Temperature** (`150°C–340°C` / `300°F–650°F`) and **Duration** (`10s–120s`) in 5-unit steps (`[` / `]` or `,` / `/`) with live `0xcc` updates.
-- **Sesh Preset Editor (`P`):** Switch between or edit all 5 stored presets (`P1`–`P5`) for both **WAX** (Concentrate) and **HERB** (Dry Herb) modes.
+- **Sesh Preset Editor (`P`):** Switch between or edit all 5 stored presets (`P1`–`P5`) for both **WAX** (Concentrate) and **HERB** (Dry Herb) modes, writing the full 5-slot table permanently to the Carta's flash via `0x66` (`19` bytes) as well as updating the active heating register (`0xcc`).
 - **RGB LED Preset Customizer (`L`):** Turn LEDs `OFF` (Stealth), pick slots `L1`–`L5`, cycle animation modes (`ROTATE`, `PULSE`, `FADE`, `SPARKLE`, `STATIC`), and customize all 5 RGB color stops (`0xe0`–`0xe4`).
 - **One-Tap Heating (`Space` / `Enter`):** Starts (`0xcc` `0xa5`) or stops (`0xcc` `0xaf`) a session immediately.
 
@@ -91,7 +91,7 @@ All screenshots below are captured directly from OpenCartaZero's native `320×17
   5. *Flash Melt → Mellow Finish (55s)* — Fast melt followed by a cool backend (`240°C → 212°C`)
 - **Live Target vs. Atomizer Graph:** Plots the dashed/blue target curve alongside the real-time red atomizer temperature trace and moving playhead.
 - **Smooth & Stepped Interpolation (`M`):** Toggle between continuous linear interpolation and stepped plateau holds.
-- **Point Editor (`E`) & Auto-Generator (`G`):** Edit individual `(time, temp)` breakpoints, add/remove points, generate curves (`Exponential Decay`, `Linear Ramp`, `3-Step Terp Ladder`, `Flavor Hold -> Ramp`), and persist custom curves to `~/.config/opencartazero/curves.json`.
+- **Point Editor (`E`), Auto-Generator (`G`) & Curve Manager (`N` / `R` / `D`):** Edit individual `(time, temp)` breakpoints, add/remove points, auto-generate curves (`Exponential Decay`, `Linear Ramp`, `3-Step Terp Ladder`, `Flavor Hold -> Ramp`), clone new custom curves (`N`), rename (`R` with full Shift uppercase/symbol support), delete curves (`D` / `Backspace`), and persist all curves to `~/.config/opencartazero/curves.json`.
 
 ### 4. Device Settings (`DEVICE` Tab — Key `4`)
 Compact 3×3 grid giving instant keyboard access to every device setting:
@@ -121,6 +121,8 @@ OpenCartaZero is designed for fast, one-handed or two-thumb Cardputer Zero opera
 | `Enter` | Focused Item | Open modal, connect device, or apply/save changes |
 | `P` / `L` | Home | Open **Sesh Preset Editor** / **LED Preset Editor** |
 | `E` / `G` / `M` | Curves | Open **Point Editor** / **Auto-Generator** / toggle **Smooth vs. Step** |
+| `N` / `R` / `D` | Curves | **New** custom curve / **Rename** curve / **Delete** curve |
+| `Shift` | Rename Modal | Hold or tap-latch **Shift** for uppercase (`A–Z`) and symbols |
 | `R` / `A` / `O` | Connect | Rescan BLE / toggle **Show all BLE** / **Continue Offline** |
 | `U` / `L` | Device | Quick-toggle **°C / °F** / open **BLE Packet Log** |
 | `Short ESC` | Modal | Close current modal and return to tab |
