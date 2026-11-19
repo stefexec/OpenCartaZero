@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 geminikey.txt
 .DS_Store
+build/
+*.deb
+video/
