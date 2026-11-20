@@ -22,7 +22,7 @@
     "icon": "opencartazero.png",
     "license": "GPL-3.0-or-later",
     "source_repo": "https://github.com/stefexec/OpenCartaZero",
-    "author": { "github": "stefexec", "display_name": "Stefan" },
+    "author": { "github": "stefexec", "display_name": "Gurkenwerfer" },
     "share_code": "OCZ0",
     "permissions": {
       "camera": false,

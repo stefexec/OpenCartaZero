@@ -22,7 +22,7 @@ cat > "$STAGE/DEBIAN/control" <<'EOF'
 Package: opencartazero
 Version: 1.1.0
 Architecture: arm64
-Maintainer: Stefan <stefan@gurk.dev>
+Maintainer: Gurkenwerfer <stefan@gurk.dev>
 Section: utils
 Priority: optional
 Depends: python3, python3-pygame, python3-gi, bluez
